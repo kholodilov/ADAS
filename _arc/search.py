@@ -205,7 +205,7 @@ class AgentSystem():
             try:
                 transformed_grid = transform(input_grid)
             except Exception as e:
-                return gen_output("Error during function execution: {e}"), correct_examples, wrong_examples
+                return gen_output(f"Error during function execution: {e}"), correct_examples, wrong_examples
 
             if transformed_grid == output_grid:
                 feedback += f"Your transform function generates a CORRECT answer in Example {idx}!\n\n"
@@ -244,7 +244,7 @@ class AgentSystem():
             transform_output = transform(test_input)
             transform_output = list_to_string(transform_output)
         except Exception as e:
-            return gen_output("Error during function execution: {e}")
+            return gen_output(f"Error during function execution: {e}")
 
         return gen_output(transform_output)
 
@@ -449,25 +449,28 @@ def single_run_forward_fn(args, forward_str):
         arc_data_queue = pickle.load(pickle_file)
     
     agent_task_queue = []
-    for arc_data in arc_data_queue[:1]:
+    for arc_data in arc_data_queue[args.example_idx:args.example_idx+1]:
         task_str, examples, test_input = format_arc_data(arc_data)
         taskInfo = Info('task', 'User', task_str, -1)
         agent_task_queue.extend([(AgentSystem(examples, test_input), taskInfo, arc_data)])
 
     def call_forward(agent_task_queue):
         agent, taskInfo, arc_data = agent_task_queue
-        (code, res) = agent.forward(taskInfo)
-        origin_res = res
-        try:
-            if isinstance(res, Info):
-                res = res.content
-            if isinstance(res, str):
-                res = eval(res)
-            hard_score = eval_solution(res, arc_data, soft_eval=False)
-            return (taskInfo, arc_data, code, origin_res, res, hard_score)
-        except Exception as e:
-            print(e)
-            return (taskInfo, arc_data, code, origin_res, "", 0)
+        if args.dry_run:
+            return (taskInfo, arc_data, None, None, None, None)
+        else:
+            (code, res) = agent.forward(taskInfo)
+            origin_res = res
+            try:
+                if isinstance(res, Info):
+                    res = res.content
+                if isinstance(res, str):
+                    res = eval(res)
+                hard_score = eval_solution(res, arc_data, soft_eval=False)
+                return (taskInfo, arc_data, code, origin_res, res, hard_score)
+            except Exception as e:
+                print(e)
+                return (taskInfo, arc_data, code, origin_res, "", 0)
 
     acc_list = list(tqdm(map(call_forward, agent_task_queue), total=len(agent_task_queue)))
 
@@ -520,6 +523,8 @@ if __name__ == "__main__":
                         default='gpt-4o-2024-05-13',
                         choices=['gpt-4-turbo-2024-04-09', 'gpt-3.5-turbo-0125', 'gpt-4o-2024-05-13'])
     parser.add_argument('--single_run', type=str, default=None, help='Path to file containing code for a single run evaluation')
+    parser.add_argument('--dry_run', action='store_true', help='If set, only print task information without running the agent', default=False)
+    parser.add_argument('--example_idx', type=int, default=0, help='Index of the example to use for evaluation')
 
     args = parser.parse_args()
 
