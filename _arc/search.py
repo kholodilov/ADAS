@@ -28,7 +28,7 @@ PRINT_LLM_DEBUG = False
 SEARCHING_MODE = True
 
 
-@backoff.on_exception(backoff.expo, openai.RateLimitError)
+#@backoff.on_exception(backoff.expo, openai.RateLimitError)
 def get_json_response_from_gpt(
         msg,
         model,
@@ -73,7 +73,7 @@ class LLMAgentBase():
     """
 
     def __init__(self, output_fields: list, agent_name: str,
-                 role='helpful assistant', model='gpt-3.5-turbo-0125', temperature=0.5) -> None:
+                 role='helpful assistant', model='gpt-4o-2024-08-06', temperature=0.5) -> None:
         self.output_fields = output_fields
         self.agent_name = agent_name
 
@@ -124,13 +124,17 @@ class LLMAgentBase():
         return system_prompt, prompt
 
     def query(self, input_infos: list, instruction, iteration_idx=-1) -> dict:
+        query_agent_str = f"{self.__repr__()}{' #' + str(iteration_idx) if iteration_idx >= 0 else ''}"
+        print(f"*** Querying LLM agent {query_agent_str}")
         system_prompt, prompt = self.generate_prompt(input_infos, instruction)
+        print(f"*** System prompt:\n{system_prompt}")
+        print(f"*** Prompt:\n{prompt}")
         try:
             response_json = {}
             response_json = get_json_response_from_gpt(prompt, self.model, system_prompt, self.temperature)
             assert len(response_json) == len(self.output_fields), "not returning enough fields"
         except Exception as e:
-            # print(e)
+            print(e)
             if "maximum context length" in str(e) and SEARCHING_MODE:
                 raise AssertionError("The context is too long. Please try to design the agent to have shorter context.")
             # try to fill in the missing field
@@ -144,6 +148,8 @@ class LLMAgentBase():
         for key, value in response_json.items():
             info = Info(key, self.__repr__(), value, iteration_idx)
             output_infos.append(info)
+            print(f"*** OUTPUT '{key}':\n{value}")
+        print(f"*** Done querying {query_agent_str}\n\n")
         return output_infos
 
     def __repr__(self):
@@ -159,6 +165,15 @@ class AgentSystem():
         self.test_iuput = test_iuput
 
     def run_examples_and_get_feedback(self, code):
+        print("*** Evaluation")
+        result = self._run_examples_and_get_feedback(code)
+        print(f"Feedback: {result[0].content}")
+        print(f"Correct examples cnt: {len(result[1])}")
+        print(f"Wrong examples cnt: {len(result[2])}")
+        print("*** Finished evaluation\n\n")
+        return result
+
+    def _run_examples_and_get_feedback(self, code):
         examples = self.examples
 
         correct_examples = []
@@ -417,6 +432,75 @@ def evaluate_forward_fn(args, forward_str):
     print("acc:", bootstrap_confidence_interval(acc_list))
     return acc_list
 
+def single_run_forward_fn(args, forward_str):
+    namespace = {}
+    exec(forward_str, globals(), namespace)
+    names = list(namespace.keys())
+    if len(names) != 1:
+        raise AssertionError(f"{len(names)} things in namespace. Please only provide 1")
+    func = namespace[names[0]]
+    if not callable(func):
+        raise AssertionError(f"{func} is not callable")
+    setattr(AgentSystem, "forward", func)
+
+    arc_dir = args.test_data_path
+    print(arc_dir)
+    with open(arc_dir, 'rb') as pickle_file:
+        arc_data_queue = pickle.load(pickle_file)
+    
+    agent_task_queue = []
+    for arc_data in arc_data_queue[:1]:
+        task_str, examples, test_input = format_arc_data(arc_data)
+        taskInfo = Info('task', 'User', task_str, -1)
+        agent_task_queue.extend([(AgentSystem(examples, test_input), taskInfo, arc_data)])
+
+    def call_forward(agent_task_queue):
+        agent, taskInfo, arc_data = agent_task_queue
+        (code, res) = agent.forward(taskInfo)
+        origin_res = res
+        try:
+            if isinstance(res, Info):
+                res = res.content
+            if isinstance(res, str):
+                res = eval(res)
+            hard_score = eval_solution(res, arc_data, soft_eval=False)
+            return (taskInfo, arc_data, code, origin_res, res, hard_score)
+        except Exception as e:
+            print(e)
+            return (taskInfo, arc_data, code, origin_res, "", 0)
+
+    acc_list = list(tqdm(map(call_forward, agent_task_queue), total=len(agent_task_queue)))
+
+    return acc_list
+
+def single_run(args):
+    if not args.single_run:
+        print("No code file provided for single run evaluation.")
+        return
+
+    try:
+        with open(args.single_run, 'r') as file:
+            code = file.read()
+    except FileNotFoundError:
+        print(f"Error: File '{args.single_run}' not found.")
+        return
+    except IOError:
+        print(f"Error: Unable to read file '{args.single_run}'.")
+        return
+
+    print("Evaluating single run:")
+    try:
+        acc_list = single_run_forward_fn(args, code)
+        for taskInfo, arc_data, code, origin_res, res, hard_score in acc_list:
+            print(f"taskInfo: {taskInfo}")
+            print(f"arc_data: {arc_data}")
+            print(f"code: {code}")
+            print(f"origin_res: {origin_res}")
+            print(f"res: {res}")
+            print(f"hard_score: {hard_score}")
+    except Exception as e:
+        print(f"Error during single run evaluation: {e}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -435,12 +519,17 @@ if __name__ == "__main__":
                         type=str,
                         default='gpt-4o-2024-05-13',
                         choices=['gpt-4-turbo-2024-04-09', 'gpt-3.5-turbo-0125', 'gpt-4o-2024-05-13'])
+    parser.add_argument('--single_run', type=str, default=None, help='Path to file containing code for a single run evaluation')
 
     args = parser.parse_args()
-    # search
-    SEARCHING_MODE = True
-    search(args)
 
-    # evaluate
-    SEARCHING_MODE = False
-    evaluate(args)
+    if args.single_run:
+        single_run(args)
+    else:
+        # search
+        SEARCHING_MODE = True
+        search(args)
+
+        # evaluate
+        SEARCHING_MODE = False
+        evaluate(args)
